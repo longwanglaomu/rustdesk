@@ -238,10 +238,20 @@ jobs:
           popd
           ls -la flutter/build/ios/ipa/ || true
 
+      - name: Package unsigned app
+        # --no-codesign 只会产出 xcarchive，没有 ipa，这里打成 zip 方便下载
+        run: |
+          APP=$(find flutter/build/ios -maxdepth 6 -name "Runner.app" -type d | head -1)
+          echo "Runner.app = $APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" rustdesk-ios-unsigned.zip
+          ls -lh rustdesk-ios-unsigned.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: rustdesk-ios-unsigned
-          path: flutter/build/ios/ipa/*.ipa
+          path: |
+            rustdesk-ios-unsigned.zip
+            flutter/build/ios/ipa/*.ipa
           if-no-files-found: warn
 
   # =============================================================== Android
