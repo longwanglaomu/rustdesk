@@ -307,7 +307,11 @@ jobs:
           VCPKG_INSTALLED_ROOT: /opt/vcpkg/installed
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          # wakelock_plus 等插件要求用 JDK 17 编译，runner 默认是 11
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
         run: |
+          export PATH=$JAVA_HOME/bin:$PATH
+          java -version
           # hwcodec / scrap 的 bindgen 需要用 NDK 的 libclang + sysroot，
           # 否则会去读宿主的 /usr/include/stdint.h 而失败
           SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
