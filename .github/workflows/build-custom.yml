@@ -1,0 +1,317 @@
+name: build-custom-client
+
+# 手动触发：GitHub 仓库 → Actions → build-custom-client → Run workflow
+# 产物：Windows 安装包、macOS dmg、iOS 未签名 ipa、Android arm64 apk
+on:
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.75.0"
+  MAC_RUST_VERSION: "1.81.0"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+
+jobs:
+  # ===================================================== 生成 flutter-rust 桥接代码
+  generate-bridge:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake gcc g++ libclang-dev libgtk-3-dev \
+            llvm-dev nasm ninja-build pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install codegen tools
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+
+      - name: Generate bridge
+        run: |
+          cd flutter && flutter pub get && cd ..
+          flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-artifact
+          path: |
+            src/bridge_generated.rs
+            src/bridge_generated.io.rs
+            flutter/lib/generated_bridge.dart
+            flutter/lib/generated_bridge.freezed.dart
+            flutter/macos/Runner/bridge_generated.h
+            flutter/ios/Runner/bridge_generated.h
+
+  # =============================================================== Windows
+  build-windows:
+    runs-on: windows-2022
+    needs: [generate-bridge]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install LLVM (bindgen)
+        run: choco install llvm -y --no-progress
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies
+        shell: bash
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build
+        shell: bash
+        env:
+          VCPKG_ROOT: C:\vcpkg
+          VCPKG_INSTALLED_ROOT: C:\vcpkg\installed
+        run: |
+          pushd flutter && flutter pub get && popd
+          python -m pip install -r libs/portable/requirements.txt
+          python build.py --flutter --hwcodec --vram
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-x64
+          path: |
+            rustdesk-*-install.exe
+            target/release/rustdesk.exe
+          if-no-files-found: warn
+
+  # ================================================================= macOS
+  build-macos:
+    runs-on: macos-14
+    needs: [generate-bridge]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install deps
+        run: brew install nasm yasm create-dmg
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MAC_RUST_VERSION }}
+          targets: aarch64-apple-darwin
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: arm64
+          cache: true
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: ${{ runner.workspace }}/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet arm64-osx \
+            --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build
+        env:
+          VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
+          VCPKG_INSTALLED_ROOT: ${{ runner.workspace }}/vcpkg/installed
+        run: |
+          pushd flutter && flutter pub get && popd
+          ./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit
+
+      - name: Package dmg
+        run: |
+          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" \
+            --window-size 800 400 --app-drop-link 600 185 \
+            rustdesk-macos-arm64.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app || true
+          ls -la *.dmg || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-macos-arm64
+          path: rustdesk-macos-arm64.dmg
+          if-no-files-found: warn
+
+  # =================================================================== iOS
+  build-ios:
+    runs-on: macos-14
+    needs: [generate-bridge]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install deps
+        run: brew install nasm yasm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: arm64
+          cache: true
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: ${{ runner.workspace }}/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet arm64-ios \
+            --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build
+        env:
+          VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
+          VCPKG_INSTALLED_ROOT: ${{ runner.workspace }}/vcpkg/installed
+        run: |
+          cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
+          pushd flutter
+          flutter pub get
+          flutter build ipa --release --no-codesign
+          popd
+          ls -la flutter/build/ios/ipa/ || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-ios-unsigned
+          path: flutter/build/ios/ipa/*.ipa
+          if-no-files-found: warn
+
+  # =============================================================== Android
+  build-android:
+    runs-on: ubuntu-22.04
+    needs: [generate-bridge]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev nasm libclang-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r28c
+          add-to-path: true
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_ROOT: /opt/vcpkg
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: ./flutter/build_android_deps.sh arm64-v8a
+
+      - name: Build
+        env:
+          VCPKG_ROOT: /opt/vcpkg
+          VCPKG_INSTALLED_ROOT: /opt/vcpkg/installed
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo install cargo-ndk --version 3.1.2 --locked
+          ./flutter/ndk_arm64.sh
+          mkdir -p flutter/android/app/src/main/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/liblibrustdesk.so \
+             flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+             flutter/android/app/src/main/jniLibs/arm64-v8a/
+          # 仓库里没有签名证书配置时用 debug 签名，保证 CI 也能出可安装的包
+          sed -i 's/signingConfigs.release/signingConfigs.debug/g' flutter/android/app/build.gradle
+          cd flutter
+          flutter pub get
+          flutter build apk --release --target-platform android-arm64 --split-per-abi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-android-arm64
+          path: flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
