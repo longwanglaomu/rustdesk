@@ -189,6 +189,7 @@ jobs:
           sed -i '' -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*\.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MINVER}/" build.py || true
           sed -i '' -e "s/platform :osx, '.*'/platform :osx, '${MINVER}'/" flutter/macos/Podfile || true
           sed -i '' -e "s/osx_minimum_system_version = \"[0-9]*\.[0-9]*\"/osx_minimum_system_version = \"${MINVER}\"/" Cargo.toml || true
+          sed -i '' -e "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*\.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = ${MINVER};/" flutter/macos/Runner.xcodeproj/project.pbxproj || true
           pushd flutter && flutter pub get && popd
           ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.extra }}
 
