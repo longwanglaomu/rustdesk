@@ -193,17 +193,46 @@ jobs:
           pushd flutter && flutter pub get && popd
           ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.extra }}
 
+      - name: Inspect bundle
+        run: |
+          APP=flutter/build/macos/Build/Products/Release/RustDesk.app
+          echo "== tree =="
+          find "$APP" -maxdepth 2 | head -40
+          echo "== arch =="
+          file "$APP/Contents/MacOS/RustDesk"
+          echo "== linked libs =="
+          otool -L "$APP/Contents/MacOS/RustDesk" || true
+          echo "== frameworks =="
+          ls -la "$APP/Contents/Frameworks" || true
+          echo "== dylib install names =="
+          otool -L "$APP/Contents/Frameworks/liblibrustdesk.dylib" 2>/dev/null | head -5 || true
+          otool -D "$APP/Contents/Frameworks/liblibrustdesk.dylib" 2>/dev/null || true
+          echo "== codesign(before) =="
+          codesign -dv --verbose=4 "$APP" 2>&1 || true
+
+      - name: Ad-hoc codesign (unsigned dist needs this)
+        run: |
+          APP=flutter/build/macos/Build/Products/Release/RustDesk.app
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP" || true
+          codesign -dv --verbose=4 "$APP" 2>&1 || true
+
       - name: Package dmg
         run: |
           create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" \
             --window-size 800 400 --app-drop-link 600 185 \
             rustdesk-macos-${{ matrix.arch }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app || true
           ls -la *.dmg || true
+          # 同时打包 .app，方便排查/直接拖拽安装
+          tar -czf rustdesk-macos-${{ matrix.arch }}-app.tar.gz -C flutter/build/macos/Build/Products/Release RustDesk.app
+          ls -lh rustdesk-macos-${{ matrix.arch }}-app.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
           name: rustdesk-macos-${{ matrix.arch }}
-          path: rustdesk-macos-${{ matrix.arch }}.dmg
+          path: |
+            rustdesk-macos-${{ matrix.arch }}.dmg
+            rustdesk-macos-${{ matrix.arch }}-app.tar.gz
           if-no-files-found: warn
 
   # =================================================================== iOS
