@@ -124,9 +124,26 @@ jobs:
           if-no-files-found: warn
 
   # ================================================================= macOS
+  # 同时出 arm64（Apple Silicon）和 x86_64（Intel）两个 dmg
   build-macos:
-    runs-on: macos-14
+    runs-on: ${{ matrix.os }}
     needs: [generate-bridge]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            triplet: arm64-osx
+            extra: "--screencapturekit"
+            minver: "12.3"
+          - arch: x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            triplet: x64-osx
+            extra: ""
+            minver: "10.14"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -141,14 +158,13 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.MAC_RUST_VERSION }}
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          architecture: arm64
           cache: true
 
       - name: Setup vcpkg
@@ -161,7 +177,7 @@ jobs:
         env:
           VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
         run: |
-          "$VCPKG_ROOT/vcpkg" install --triplet arm64-osx \
+          "$VCPKG_ROOT/vcpkg" install --triplet ${{ matrix.triplet }} \
             --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Build
@@ -169,20 +185,24 @@ jobs:
           VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
           VCPKG_INSTALLED_ROOT: ${{ runner.workspace }}/vcpkg/installed
         run: |
+          MINVER="${{ matrix.minver }}"
+          sed -i '' -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*\.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MINVER}/" build.py || true
+          sed -i '' -e "s/platform :osx, '.*'/platform :osx, '${MINVER}'/" flutter/macos/Podfile || true
+          sed -i '' -e "s/osx_minimum_system_version = \"[0-9]*\.[0-9]*\"/osx_minimum_system_version = \"${MINVER}\"/" Cargo.toml || true
           pushd flutter && flutter pub get && popd
-          ./build.py --flutter --hwcodec --unix-file-copy-paste --screencapturekit
+          ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.extra }}
 
       - name: Package dmg
         run: |
           create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" \
             --window-size 800 400 --app-drop-link 600 185 \
-            rustdesk-macos-arm64.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app || true
+            rustdesk-macos-${{ matrix.arch }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app || true
           ls -la *.dmg || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-macos-arm64
-          path: rustdesk-macos-arm64.dmg
+          name: rustdesk-macos-${{ matrix.arch }}
+          path: rustdesk-macos-${{ matrix.arch }}.dmg
           if-no-files-found: warn
 
   # =================================================================== iOS
